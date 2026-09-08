@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <title>Universal AR Poster Scanner</title>
+  <title>Universal AR Poster Scanner V5</title>
 
   <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
@@ -319,9 +319,9 @@
   <div id="startScreen">
     <div class="card">
       <div class="eyebrow">UNIVERSAL IMAGE-TRACKED WEBAR</div>
-      <h1>200 POSTER<br>SCANNER</h1>
+      <h1>200 POSTER<br>SCANNER V5</h1>
       <p class="desc">
-        One camera experience for up to 200 different posters. Each recognized poster loads only its own matching animation.
+        One camera experience for up to 200 posters. Each poster can use its own width, height, aspect ratio, and matching animation.
       </p>
       <button id="startBtn" disabled>LOADING…</button>
       <div id="statusBox">Preparing scanner…</div>
@@ -350,7 +350,11 @@
       manifestFile: './posters.json',
       posterCount: 200,
       maxTrack: 1,
-      defaultRatio: 843 / 596, // 1.41442953 — change per poster in posters.json if needed
+      // Fallback dimensions used only when a posters.json entry does not provide
+      // width/height or an explicit ratio.
+      defaultWidth: 596,
+      defaultHeight: 843,
+      defaultRatio: 843 / 596,
       fallbackVideoFolder: './videos/',
       fallbackVideoPrefix: 'poster-',
       fallbackVideoExtension: '.mp4',
@@ -415,6 +419,8 @@
         id: `poster-${pad3(i + 1)}`,
         name: `Poster ${pad3(i + 1)}`,
         video: `${CONFIG.fallbackVideoFolder}${CONFIG.fallbackVideoPrefix}${pad3(i + 1)}${CONFIG.fallbackVideoExtension}`,
+        width: CONFIG.defaultWidth,
+        height: CONFIG.defaultHeight,
         ratio: CONFIG.defaultRatio,
         loop: true
       }));
@@ -422,12 +428,42 @@
 
     function normalizeEntry(entry, i) {
       const targetIndex = Number.isFinite(Number(entry.targetIndex)) ? Number(entry.targetIndex) : i;
+
+      // V5: every poster can have a different aspect ratio.
+      // Preferred format in posters.json:
+      //   "width": 596,
+      //   "height": 843
+      // The scanner calculates height / width automatically.
+      //
+      // Backwards compatibility:
+      // if an older entry already contains "ratio", that value still works.
+      const widthValue = Number(entry.width);
+      const heightValue = Number(entry.height);
+      const explicitRatio = Number(entry.ratio);
+
+      const hasDimensions =
+        Number.isFinite(widthValue) && widthValue > 0 &&
+        Number.isFinite(heightValue) && heightValue > 0;
+
+      const calculatedRatio = hasDimensions
+        ? heightValue / widthValue
+        : NaN;
+
+      const finalRatio =
+        Number.isFinite(explicitRatio) && explicitRatio > 0
+          ? explicitRatio
+          : Number.isFinite(calculatedRatio) && calculatedRatio > 0
+            ? calculatedRatio
+            : CONFIG.defaultRatio;
+
       return {
         targetIndex,
         id: entry.id || `poster-${pad3(targetIndex + 1)}`,
         name: entry.name || `Poster ${pad3(targetIndex + 1)}`,
         video: entry.video || `${CONFIG.fallbackVideoFolder}${CONFIG.fallbackVideoPrefix}${pad3(targetIndex + 1)}${CONFIG.fallbackVideoExtension}`,
-        ratio: Math.max(0.1, Number(entry.ratio) || CONFIG.defaultRatio),
+        width: hasDimensions ? widthValue : CONFIG.defaultWidth,
+        height: hasDimensions ? heightValue : CONFIG.defaultHeight,
+        ratio: Math.max(0.1, finalRatio),
         loop: entry.loop !== false,
         scale: Math.max(0.05, Number(entry.scale) || 1),
         offsetX: Number(entry.offsetX) || 0,
@@ -909,6 +945,10 @@
 
       scanLabel.textContent = `${item.name.toUpperCase()} FOUND · LOADING VIDEO…`;
       liveBadge.textContent = `TARGET ${pad3(item.targetIndex + 1)} · ${item.name}`;
+      console.log(
+        `[AR] ${item.name}: targetIndex=${item.targetIndex}, ` +
+        `size=${item.width}×${item.height}, ratio=${item.ratio.toFixed(5)}, video=${item.video}`
+      );
 
       try {
         const info = await loadAndPlayVideo(item);
@@ -1168,6 +1208,7 @@ Tap START AR to resume without refreshing.`, 'good');
         startBtn.textContent = 'START AR';
         setStatus(
           `READY\nPoster definitions: ${manifestInfo.count}\nManifest: ${manifestInfo.source}\n${targetInfo.length ? `targets.mind: ${targetInfo.length.toLocaleString()} bytes` : 'targets.mind: reachable'}\nOnly the detected poster's MP4 will load.
+Aspect ratio: automatic from width + height (ratio field still supported).
 Camera startup: iOS-safe direct-tap mode.`,
           'good'
         );
