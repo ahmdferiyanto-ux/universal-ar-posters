@@ -259,7 +259,7 @@
           playsinline
           webkit-playsinline
           crossorigin="anonymous"
-          style="display:none"
+          style="position:fixed;left:-8px;top:-8px;width:2px;height:2px;opacity:0.001;pointer-events:none;z-index:-1;"
         ></video>
       </a-assets>
 
@@ -332,7 +332,7 @@
     let arRunning = false;
     let activeTargetIndex = null;
     let activeAnchor = null;
-    let videoPlane = null;
+    let activeVideoPlane = null;
     let cameraStyleTimer = null;
 
     /* ============================================================
@@ -478,22 +478,61 @@
     /* ============================================================
        BUILD 200 TARGET ANCHORS
        ============================================================ */
-    function createVideoPlane() {
-      if (videoPlane) return videoPlane;
+    function destroyActiveVideoPlane() {
+      if (!activeVideoPlane) return;
+      try {
+        if (activeVideoPlane.parentElement) {
+          activeVideoPlane.parentElement.removeChild(activeVideoPlane);
+        }
+      } catch (_) {}
+      activeVideoPlane = null;
+    }
+
+    function createActiveVideoPlane(item, anchor) {
+      destroyActiveVideoPlane();
+
+      // Create the AR video surface fresh INSIDE the detected target anchor.
+      // This is more reliable on mobile than creating one plane in the scene
+      // and re-parenting it between 200 different MindAR anchors.
       const plane = document.createElement('a-plane');
-      plane.id = 'dynamicVideoPlane';
+      plane.id = `activeVideoPlane-${item.targetIndex}`;
+
+      const planeWidth = item.scale;
+      const planeHeight = item.ratio * item.scale;
+
+      plane.setAttribute('geometry', `primitive: plane; width: ${planeWidth}; height: ${planeHeight}`);
+      plane.setAttribute('position', `${item.offsetX} ${item.offsetY} 0.015`);
+      plane.setAttribute('rotation', `0 0 ${item.rotation}`);
+      plane.setAttribute('material', 'shader: flat; src: #dynamicPosterVideo; side: double; transparent: false; depthTest: false; depthWrite: false');
       plane.setAttribute('visible', 'false');
-      plane.setAttribute('position', '0 0 0.01');
-      plane.setAttribute('geometry', 'primitive: plane; width: 1; height: 1.41443');
-      plane.setAttribute('material', 'shader: flat; src: #dynamicPosterVideo; side: double; transparent: true');
-      videoPlane = plane;
-      scene.appendChild(videoPlane);
+
+      anchor.appendChild(plane);
+      activeVideoPlane = plane;
       return plane;
+    }
+
+    function refreshVideoTexture(plane) {
+      // A-Frame/three.js normally updates video textures automatically,
+      // but forcing an update after a dynamic src change fixes cases where
+      // iOS Safari reports the video as playing while the AR plane stays blank.
+      const force = () => {
+        try {
+          const comp = plane && plane.components && plane.components.material;
+          const material = comp && comp.material;
+          if (material && material.map) {
+            material.map.needsUpdate = true;
+          }
+          if (material) material.needsUpdate = true;
+        } catch (_) {}
+      };
+      requestAnimationFrame(() => {
+        force();
+        requestAnimationFrame(force);
+      });
     }
 
     function buildTargetAnchors() {
       if (anchorsBuilt) return;
-      createVideoPlane();
 
       for (const item of manifest) {
         const anchor = document.createElement('a-entity');
@@ -512,81 +551,144 @@
     /* ============================================================
        DYNAMIC VIDEO LOADING
        ============================================================ */
+    function waitForVideoFirstFrame(timeoutMs = 8000) {
+      return new Promise((resolve, reject) => {
+        let done = false;
+        const finish = (ok, value) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          if (ok) resolve(value); else reject(value);
+        };
+
+        const timer = setTimeout(() => {
+          finish(false, new Error('The MP4 started but Safari did not produce a video frame in time.'));
+        }, timeoutMs);
+
+        if ('requestVideoFrameCallback' in video) {
+          video.requestVideoFrameCallback(() => finish(true));
+          return;
+        }
+
+        // Fallback for browsers without requestVideoFrameCallback.
+        const startedAt = performance.now();
+        const poll = () => {
+          if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0 && !video.paused) {
+            finish(true);
+            return;
+          }
+          if (performance.now() - startedAt > timeoutMs) return;
+          requestAnimationFrame(poll);
+        };
+        poll();
+      });
+    }
+
     async function loadAndPlayVideo(item) {
-      video.pause();
+      try { video.pause(); } catch (_) {}
+
       video.loop = item.loop !== false;
       video.muted = true;
+      video.defaultMuted = true;
       video.playsInline = true;
+      video.autoplay = false;
+      video.setAttribute('muted', '');
       video.setAttribute('playsinline', '');
       video.setAttribute('webkit-playsinline', '');
 
       const wanted = new URL(item.video, window.location.href).href;
-      if (video.src !== wanted) {
+      const current = video.currentSrc || video.src || '';
+
+      if (current !== wanted) {
+        try { video.pause(); } catch (_) {}
         video.removeAttribute('src');
-        video.load();
+        try { video.load(); } catch (_) {}
         video.src = item.video;
         video.load();
       }
+
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+          video.removeEventListener('loadeddata', onReady);
+          video.removeEventListener('canplay', onReady);
+          video.removeEventListener('error', onError);
+        };
+        const finish = (fn, value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          fn(value);
+        };
+        const onReady = () => {
+          if (video.videoWidth > 0 && video.videoHeight > 0) finish(resolve);
+        };
+        const onError = () => {
+          const mediaError = video.error ? ` MediaError code ${video.error.code}.` : '';
+          finish(reject, new Error(`Could not decode ${item.video}.${mediaError} Use an H.264 MP4 for iPhone Safari.`));
+        };
+        video.addEventListener('loadeddata', onReady, { once: true });
+        video.addEventListener('canplay', onReady, { once: true });
+        video.addEventListener('error', onError, { once: true });
+
+        if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+          finish(resolve);
+        }
+      });
 
       if (CONFIG.restartAnimationOnFound) {
         try { video.currentTime = 0; } catch (_) {}
       }
 
-      return new Promise((resolve, reject) => {
-        let settled = false;
-        const cleanup = () => {
-          video.removeEventListener('canplay', onCanPlay);
-          video.removeEventListener('error', onError);
-        };
-        const onCanPlay = async () => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          try {
-            await video.play();
-            resolve();
-          } catch (e) {
-            reject(e);
-          }
-        };
-        const onError = () => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(new Error(`Could not load ${item.video}. Check that this MP4 exists on your host.`));
-        };
-        video.addEventListener('canplay', onCanPlay, { once: true });
-        video.addEventListener('error', onError, { once: true });
-        if (video.readyState >= 3) onCanPlay();
-      });
+      await video.play();
+      await waitForVideoFirstFrame();
+
+      return {
+        width: video.videoWidth,
+        height: video.videoHeight,
+        duration: Number.isFinite(video.duration) ? video.duration : 0
+      };
     }
 
     async function activatePoster(item, anchor) {
       if (!arRunning) return;
+
       activeTargetIndex = item.targetIndex;
       activeAnchor = anchor;
 
-      scanLabel.textContent = `${item.name.toUpperCase()} FOUND · LOADING…`;
+      scanLabel.textContent = `${item.name.toUpperCase()} FOUND · LOADING VIDEO…`;
       liveBadge.textContent = `TARGET ${pad3(item.targetIndex + 1)} · ${item.name}`;
 
-      const plane = createVideoPlane();
-      if (plane.parentElement !== anchor) anchor.appendChild(plane);
-
-      const width = item.scale;
-      const height = item.ratio * item.scale;
-      plane.setAttribute('geometry', `primitive: plane; width: ${width}; height: ${height}`);
-      plane.setAttribute('position', `${item.offsetX} ${item.offsetY} 0.01`);
-      plane.setAttribute('rotation', `0 0 ${item.rotation}`);
-      plane.setAttribute('visible', 'false');
-
       try {
-        await loadAndPlayVideo(item);
-        if (activeTargetIndex !== item.targetIndex) return;
+        const info = await loadAndPlayVideo(item);
+        if (activeTargetIndex !== item.targetIndex || activeAnchor !== anchor) return;
+
+        const plane = createActiveVideoPlane(item, anchor);
+
+        // Wait until A-Frame has initialized the new plane and its material.
+        await new Promise(resolve => {
+          if (plane.hasLoaded) return resolve();
+          plane.addEventListener('loaded', resolve, { once: true });
+          // A-Frame custom elements often initialize before "loaded" can be observed.
+          setTimeout(resolve, 250);
+        });
+
+        if (activeTargetIndex !== item.targetIndex || activeAnchor !== anchor) return;
+
+        // Re-assign src after the MP4 has a decoded frame, then force the texture refresh.
+        plane.setAttribute('material', 'src', '#dynamicPosterVideo');
+        refreshVideoTexture(plane);
         plane.setAttribute('visible', 'true');
+
         scanLabel.textContent = `${item.name.toUpperCase()} · PLAYING`;
+        liveBadge.textContent = `${item.name} · ${info.width}×${info.height}`;
+
+        // A second refresh shortly afterwards helps older iOS Safari builds.
+        setTimeout(() => refreshVideoTexture(plane), 250);
+        setTimeout(() => refreshVideoTexture(plane), 900);
       } catch (err) {
-        console.error(err);
-        plane.setAttribute('visible', 'false');
+        console.error('VIDEO / TEXTURE ERROR', err);
+        destroyActiveVideoPlane();
         scanLabel.textContent = `${item.name.toUpperCase()} · VIDEO ERROR`;
         toast(err.message || String(err));
       }
@@ -598,8 +700,8 @@
       if (CONFIG.pauseAnimationOnLost) {
         try { video.pause(); } catch (_) {}
       }
-      if (videoPlane) videoPlane.setAttribute('visible', 'false');
 
+      destroyActiveVideoPlane();
       activeTargetIndex = null;
       activeAnchor = null;
       scanLabel.textContent = 'POINT CAMERA AT A POSTER';
@@ -684,7 +786,7 @@
         video.load();
       } catch (_) {}
 
-      if (videoPlane) videoPlane.setAttribute('visible', 'false');
+      destroyActiveVideoPlane();
       activeTargetIndex = null;
       activeAnchor = null;
       arRunning = false;
@@ -704,7 +806,10 @@
     // If Safari still blocks playback, a tap anywhere in the AR view retries the active video.
     document.addEventListener('click', async (event) => {
       if (!arRunning || event.target === stopBtn || activeTargetIndex === null || !video.paused) return;
-      try { await video.play(); } catch (_) {}
+      try {
+        await video.play();
+        if (activeVideoPlane) refreshVideoTexture(activeVideoPlane);
+      } catch (_) {}
     });
 
     /* ============================================================
