@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <title>Universal AR Poster Scanner V5</title>
+  <title>Universal AR Poster Scanner V6 — Auto MP4 Ratio</title>
 
   <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
@@ -319,9 +319,9 @@
   <div id="startScreen">
     <div class="card">
       <div class="eyebrow">UNIVERSAL IMAGE-TRACKED WEBAR</div>
-      <h1>200 POSTER<br>SCANNER V5</h1>
+      <h1>200 POSTER<br>SCANNER V6</h1>
       <p class="desc">
-        One camera experience for up to 200 posters. Each poster can use its own width, height, aspect ratio, and matching animation.
+        One camera experience for up to 200 posters. Each detected MP4 sets its own AR aspect ratio automatically from the video metadata.
       </p>
       <button id="startBtn" disabled>LOADING…</button>
       <div id="statusBox">Preparing scanner…</div>
@@ -350,10 +350,8 @@
       manifestFile: './posters.json',
       posterCount: 200,
       maxTrack: 1,
-      // Fallback dimensions used only when a posters.json entry does not provide
-      // width/height or an explicit ratio.
-      defaultWidth: 596,
-      defaultHeight: 843,
+      // Used only as a last-resort fallback if a browser cannot expose
+      // the detected MP4's intrinsic width / height. Normally V6 never uses it.
       defaultRatio: 843 / 596,
       fallbackVideoFolder: './videos/',
       fallbackVideoPrefix: 'poster-',
@@ -419,9 +417,6 @@
         id: `poster-${pad3(i + 1)}`,
         name: `Poster ${pad3(i + 1)}`,
         video: `${CONFIG.fallbackVideoFolder}${CONFIG.fallbackVideoPrefix}${pad3(i + 1)}${CONFIG.fallbackVideoExtension}`,
-        width: CONFIG.defaultWidth,
-        height: CONFIG.defaultHeight,
-        ratio: CONFIG.defaultRatio,
         loop: true
       }));
     }
@@ -429,46 +424,25 @@
     function normalizeEntry(entry, i) {
       const targetIndex = Number.isFinite(Number(entry.targetIndex)) ? Number(entry.targetIndex) : i;
 
-      // V5: every poster can have a different aspect ratio.
-      // Preferred format in posters.json:
-      //   "width": 596,
-      //   "height": 843
-      // The scanner calculates height / width automatically.
-      //
-      // Backwards compatibility:
-      // if an older entry already contains "ratio", that value still works.
-      const widthValue = Number(entry.width);
-      const heightValue = Number(entry.height);
-      const explicitRatio = Number(entry.ratio);
-
-      const hasDimensions =
-        Number.isFinite(widthValue) && widthValue > 0 &&
-        Number.isFinite(heightValue) && heightValue > 0;
-
-      const calculatedRatio = hasDimensions
-        ? heightValue / widthValue
-        : NaN;
-
-      const finalRatio =
-        Number.isFinite(explicitRatio) && explicitRatio > 0
-          ? explicitRatio
-          : Number.isFinite(calculatedRatio) && calculatedRatio > 0
-            ? calculatedRatio
-            : CONFIG.defaultRatio;
+      // V6: aspect ratio is NOT required in posters.json.
+      // The scanner reads video.videoWidth and video.videoHeight after the
+      // matching MP4 is decoded, then sets the AR plane to height / width.
+      // An old "ratio" field is accepted only as an emergency fallback.
+      const legacyRatio = Number(entry.ratio);
 
       return {
         targetIndex,
         id: entry.id || `poster-${pad3(targetIndex + 1)}`,
         name: entry.name || `Poster ${pad3(targetIndex + 1)}`,
         video: entry.video || `${CONFIG.fallbackVideoFolder}${CONFIG.fallbackVideoPrefix}${pad3(targetIndex + 1)}${CONFIG.fallbackVideoExtension}`,
-        width: hasDimensions ? widthValue : CONFIG.defaultWidth,
-        height: hasDimensions ? heightValue : CONFIG.defaultHeight,
-        ratio: Math.max(0.1, finalRatio),
         loop: entry.loop !== false,
         scale: Math.max(0.05, Number(entry.scale) || 1),
         offsetX: Number(entry.offsetX) || 0,
         offsetY: Number(entry.offsetY) || 0,
-        rotation: Number(entry.rotation) || 0
+        rotation: Number(entry.rotation) || 0,
+        fallbackRatio: Number.isFinite(legacyRatio) && legacyRatio > 0
+          ? legacyRatio
+          : CONFIG.defaultRatio
       };
     }
 
@@ -769,7 +743,7 @@
       activeVideoPlane = null;
     }
 
-    function createActiveVideoPlane(item, anchor) {
+    function createActiveVideoPlane(item, anchor, videoRatio) {
       destroyActiveVideoPlane();
 
       // Create the AR video surface fresh INSIDE the detected target anchor.
@@ -779,7 +753,10 @@
       plane.id = `activeVideoPlane-${item.targetIndex}`;
 
       const planeWidth = item.scale;
-      const planeHeight = item.ratio * item.scale;
+      const safeRatio = Number.isFinite(videoRatio) && videoRatio > 0
+        ? videoRatio
+        : item.fallbackRatio;
+      const planeHeight = safeRatio * item.scale;
 
       plane.setAttribute('geometry', `primitive: plane; width: ${planeWidth}; height: ${planeHeight}`);
       plane.setAttribute('position', `${item.offsetX} ${item.offsetY} 0.015`);
@@ -930,9 +907,16 @@
       await video.play();
       await waitForVideoFirstFrame();
 
+      const intrinsicWidth = video.videoWidth;
+      const intrinsicHeight = video.videoHeight;
+      const autoRatio = intrinsicWidth > 0 && intrinsicHeight > 0
+        ? intrinsicHeight / intrinsicWidth
+        : item.fallbackRatio;
+
       return {
-        width: video.videoWidth,
-        height: video.videoHeight,
+        width: intrinsicWidth,
+        height: intrinsicHeight,
+        ratio: autoRatio,
         duration: Number.isFinite(video.duration) ? video.duration : 0
       };
     }
@@ -946,15 +930,14 @@
       scanLabel.textContent = `${item.name.toUpperCase()} FOUND · LOADING VIDEO…`;
       liveBadge.textContent = `TARGET ${pad3(item.targetIndex + 1)} · ${item.name}`;
       console.log(
-        `[AR] ${item.name}: targetIndex=${item.targetIndex}, ` +
-        `size=${item.width}×${item.height}, ratio=${item.ratio.toFixed(5)}, video=${item.video}`
+        `[AR] ${item.name}: targetIndex=${item.targetIndex}, video=${item.video}`
       );
 
       try {
         const info = await loadAndPlayVideo(item);
         if (activeTargetIndex !== item.targetIndex || activeAnchor !== anchor) return;
 
-        const plane = createActiveVideoPlane(item, anchor);
+        const plane = createActiveVideoPlane(item, anchor, info.ratio);
 
         // Wait until A-Frame has initialized the new plane and its material.
         await new Promise(resolve => {
@@ -972,7 +955,7 @@
         plane.setAttribute('visible', 'true');
 
         scanLabel.textContent = `${item.name.toUpperCase()} · PLAYING`;
-        liveBadge.textContent = `${item.name} · ${info.width}×${info.height}`;
+        liveBadge.textContent = `${item.name} · ${info.width}×${info.height} · ${info.ratio.toFixed(4)}`;
 
         // A second refresh shortly afterwards helps older iOS Safari builds.
         setTimeout(() => refreshVideoTexture(plane), 250);
@@ -1208,7 +1191,8 @@ Tap START AR to resume without refreshing.`, 'good');
         startBtn.textContent = 'START AR';
         setStatus(
           `READY\nPoster definitions: ${manifestInfo.count}\nManifest: ${manifestInfo.source}\n${targetInfo.length ? `targets.mind: ${targetInfo.length.toLocaleString()} bytes` : 'targets.mind: reachable'}\nOnly the detected poster's MP4 will load.
-Aspect ratio: automatic from width + height (ratio field still supported).
+Aspect ratio: AUTO from each detected MP4 (videoHeight ÷ videoWidth).
+posters.json does not need width, height, or ratio.
 Camera startup: iOS-safe direct-tap mode.`,
           'good'
         );
