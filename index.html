@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Universal AR Poster Scanner</title>
+
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    #arContainer {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+
+    /* MindAR injects the live camera video dynamically. */
+    #arContainer video:not(#dynamicPosterVideo),
+    body > video:not(#dynamicPosterVideo) {
+      position: fixed !important;
+      inset: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: cover !important;
+      display: block !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+      z-index: 0 !important;
+      background: #000 !important;
+    }
+
+    #arScene {
+      position: fixed !important;
+      inset: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      z-index: 2 !important;
+      background: transparent !important;
+    }
+
+    #arScene canvas,
+    .a-canvas {
+      position: fixed !important;
+      inset: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      z-index: 2 !important;
+      background: transparent !important;
+    }
+
+    #startScreen {
+      position: fixed;
+      inset: 0;
+      z-index: 10000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: max(24px, env(safe-area-inset-top)) 22px max(24px, env(safe-area-inset-bottom));
+      background: #0a0a0a;
+    }
+
+    .card {
+      width: min(440px, 100%);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .eyebrow {
+      font-size: 10px;
+      letter-spacing: .18em;
+      color: #999;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 9vw, 52px);
+      line-height: .92;
+      letter-spacing: -.05em;
+    }
+
+    .desc {
+      margin: 0;
+      max-width: 380px;
+      color: #bcbcbc;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    button {
+      width: 100%;
+      min-height: 52px;
+      border: 0;
+      border-radius: 999px;
+      background: #fff;
+      color: #000;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    button:disabled { opacity: .35; }
+
+    #statusBox {
+      min-height: 96px;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 12px;
+      background: rgba(255,255,255,.04);
+      color: #ccc;
+      font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    #statusBox.good { border-color: rgba(107,255,150,.5); color: #76ff9d; }
+    #statusBox.bad { border-color: rgba(255,95,95,.55); color: #ff7777; }
+
+    #scanUI {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: none;
+      pointer-events: none;
+    }
+
+    #scanReticle {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: min(78vw, 420px);
+      height: min(68vh, 560px);
+      transform: translate(-50%, -50%);
+      border: 1px solid rgba(255,255,255,.55);
+      border-radius: 6px;
+    }
+
+    #scanReticle::before,
+    #scanReticle::after {
+      content: "";
+      position: absolute;
+      left: 8%;
+      right: 8%;
+      height: 1px;
+      background: rgba(255,255,255,.28);
+    }
+    #scanReticle::before { top: 33%; }
+    #scanReticle::after { bottom: 33%; }
+
+    #scanLabel {
+      position: absolute;
+      left: 50%;
+      bottom: calc(26px + env(safe-area-inset-bottom));
+      transform: translateX(-50%);
+      max-width: calc(100vw - 28px);
+      padding: 9px 14px;
+      border-radius: 999px;
+      background: rgba(0,0,0,.72);
+      color: #fff;
+      font-size: 11px;
+      letter-spacing: .08em;
+      text-align: center;
+      white-space: nowrap;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+
+    #topBar {
+      position: fixed;
+      top: calc(12px + env(safe-area-inset-top));
+      left: 12px;
+      right: 12px;
+      z-index: 1100;
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      pointer-events: none;
+    }
+
+    .pill {
+      padding: 8px 11px;
+      border-radius: 999px;
+      background: rgba(0,0,0,.68);
+      border: 1px solid rgba(255,255,255,.16);
+      color: #fff;
+      font: 10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+
+    #stopBtn {
+      width: auto;
+      min-height: 38px;
+      padding: 8px 14px;
+      pointer-events: auto;
+      background: rgba(0,0,0,.72);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,.22);
+      font-size: 11px;
+    }
+
+    #errorToast {
+      position: fixed;
+      left: 12px;
+      right: 12px;
+      bottom: calc(12px + env(safe-area-inset-bottom));
+      z-index: 20000;
+      display: none;
+      padding: 12px;
+      border-radius: 10px;
+      background: rgba(125,0,0,.94);
+      color: #fff;
+      font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="arContainer">
+    <a-scene
+      id="arScene"
+      mindar-image="imageTargetSrc: ./targets.mind; autoStart: false; maxTrack: 1; uiLoading: no; uiScanning: no; uiError: no; filterMinCF: 0.001; filterBeta: 0.01; warmupTolerance: 5; missTolerance: 5;"
+      embedded
+      color-space="sRGB"
+      renderer="colorManagement: true; physicallyCorrectLights: true; antialias: true; alpha: true"
+      vr-mode-ui="enabled: false"
+      device-orientation-permission-ui="enabled: false"
+    >
+      <a-assets timeout="30000">
+        <!-- One reusable video element. Its src is assigned ONLY after a poster is found. -->
+        <video
+          id="dynamicPosterVideo"
+          preload="none"
+          loop
+          muted
+          playsinline
+          webkit-playsinline
+          crossorigin="anonymous"
+          style="display:none"
+        ></video>
+      </a-assets>
+
+      <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
+
+      <!-- 200 target anchors are inserted here from posters.json before AR starts. -->
+    </a-scene>
+  </div>
+
+  <div id="startScreen">
+    <div class="card">
+      <div class="eyebrow">UNIVERSAL IMAGE-TRACKED WEBAR</div>
+      <h1>200 POSTER<br>SCANNER</h1>
+      <p class="desc">
+        One camera experience for up to 200 different posters. Each recognized poster loads only its own matching animation.
+      </p>
+      <button id="startBtn" disabled>LOADING…</button>
+      <div id="statusBox">Preparing scanner…</div>
+    </div>
+  </div>
+
+  <div id="scanUI">
+    <div id="scanReticle"></div>
+    <div id="scanLabel">POINT CAMERA AT A POSTER</div>
+  </div>
+
+  <div id="topBar">
+    <div id="liveBadge" class="pill">LIVE CAMERA · READY</div>
+    <button id="stopBtn">STOP AR</button>
+  </div>
+
+  <div id="errorToast"></div>
+
+  <script>
+  (() => {
+    /* ============================================================
+       CONFIG
+       ============================================================ */
+    const CONFIG = {
+      targetFile: './targets.mind',
+      manifestFile: './posters.json',
+      posterCount: 200,
+      maxTrack: 1,
+      defaultRatio: 843 / 596, // 1.41442953 — change per poster in posters.json if needed
+      fallbackVideoFolder: './videos/',
+      fallbackVideoPrefix: 'poster-',
+      fallbackVideoExtension: '.mp4',
+      restartAnimationOnFound: true,
+      pauseAnimationOnLost: true
+    };
+
+    /* ============================================================
+       DOM / STATE
+       ============================================================ */
+    const scene = document.getElementById('arScene');
+    const startScreen = document.getElementById('startScreen');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const scanUI = document.getElementById('scanUI');
+    const scanLabel = document.getElementById('scanLabel');
+    const topBar = document.getElementById('topBar');
+    const liveBadge = document.getElementById('liveBadge');
+    const statusBox = document.getElementById('statusBox');
+    const errorToast = document.getElementById('errorToast');
+    const video = document.getElementById('dynamicPosterVideo');
+
+    let manifest = [];
+    let anchorsBuilt = false;
+    let starting = false;
+    let arRunning = false;
+    let activeTargetIndex = null;
+    let activeAnchor = null;
+    let videoPlane = null;
+    let cameraStyleTimer = null;
+
+    /* ============================================================
+       HELPERS
+       ============================================================ */
+    function setStatus(message, type = '') {
+      statusBox.textContent = message;
+      statusBox.className = '';
+      if (type) statusBox.classList.add(type);
+    }
+
+    function toast(message) {
+      errorToast.textContent = message;
+      errorToast.style.display = 'block';
+      clearTimeout(toast._timer);
+      toast._timer = setTimeout(() => {
+        errorToast.style.display = 'none';
+      }, 7000);
+    }
+
+    function pad3(n) {
+      return String(n).padStart(3, '0');
+    }
+
+    function fallbackManifest() {
+      return Array.from({ length: CONFIG.posterCount }, (_, i) => ({
+        targetIndex: i,
+        id: `poster-${pad3(i + 1)}`,
+        name: `Poster ${pad3(i + 1)}`,
+        video: `${CONFIG.fallbackVideoFolder}${CONFIG.fallbackVideoPrefix}${pad3(i + 1)}${CONFIG.fallbackVideoExtension}`,
+        ratio: CONFIG.defaultRatio,
+        loop: true
+      }));
+    }
+
+    function normalizeEntry(entry, i) {
+      const targetIndex = Number.isFinite(Number(entry.targetIndex)) ? Number(entry.targetIndex) : i;
+      return {
+        targetIndex,
+        id: entry.id || `poster-${pad3(targetIndex + 1)}`,
+        name: entry.name || `Poster ${pad3(targetIndex + 1)}`,
+        video: entry.video || `${CONFIG.fallbackVideoFolder}${CONFIG.fallbackVideoPrefix}${pad3(targetIndex + 1)}${CONFIG.fallbackVideoExtension}`,
+        ratio: Math.max(0.1, Number(entry.ratio) || CONFIG.defaultRatio),
+        loop: entry.loop !== false,
+        scale: Math.max(0.05, Number(entry.scale) || 1),
+        offsetX: Number(entry.offsetX) || 0,
+        offsetY: Number(entry.offsetY) || 0,
+        rotation: Number(entry.rotation) || 0
+      };
+    }
+
+    async function loadManifest() {
+      try {
+        const r = await fetch(`${CONFIG.manifestFile}?v=${Date.now()}`, { cache: 'no-store' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        const list = Array.isArray(data) ? data : data.posters;
+        if (!Array.isArray(list) || !list.length) throw new Error('No poster entries found.');
+        manifest = list.map(normalizeEntry).sort((a, b) => a.targetIndex - b.targetIndex);
+        return { source: 'posters.json', count: manifest.length };
+      } catch (err) {
+        console.warn('posters.json unavailable; using filename fallback.', err);
+        manifest = fallbackManifest().map(normalizeEntry);
+        return { source: 'automatic fallback', count: manifest.length };
+      }
+    }
+
+    async function checkTargetFile() {
+      let r;
+      try {
+        r = await fetch(`${CONFIG.targetFile}?v=${Date.now()}`, { method: 'HEAD', cache: 'no-store' });
+      } catch (e) {
+        throw new Error(`Could not reach ${CONFIG.targetFile}.`);
+      }
+      if (!r.ok) throw new Error(`${CONFIG.targetFile} returned HTTP ${r.status}.`);
+
+      const contentType = r.headers.get('content-type') || '';
+      const length = Number(r.headers.get('content-length') || 0);
+      if (/text\/html/i.test(contentType)) {
+        throw new Error(`${CONFIG.targetFile} is returning HTML instead of the MindAR binary. Check the filename/path.`);
+      }
+      if (length > 0 && length < 256) {
+        throw new Error(`${CONFIG.targetFile} is only ${length} bytes. That is almost certainly an error/404 response.`);
+      }
+      return { length, contentType };
+    }
+
+    function waitForScene(timeoutMs = 15000) {
+      if (scene.hasLoaded) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('A-Frame scene did not finish loading.')), timeoutMs);
+        scene.addEventListener('loaded', () => {
+          clearTimeout(timer);
+          resolve();
+        }, { once: true });
+      });
+    }
+
+    function forceTransparentRenderer() {
+      try {
+        if (scene.renderer) {
+          scene.renderer.setClearColor(0x000000, 0);
+          if (scene.renderer.setClearAlpha) scene.renderer.setClearAlpha(0);
+          if (scene.renderer.domElement) scene.renderer.domElement.style.background = 'transparent';
+        }
+      } catch (_) {}
+    }
+
+    function styleMindARCameraVideos() {
+      const allVideos = [...document.querySelectorAll('video')];
+      const cameraVideos = allVideos.filter(v => v !== video && v.srcObject);
+
+      cameraVideos.forEach(v => {
+        Object.assign(v.style, {
+          position: 'fixed', inset: '0', width: '100%', height: '100%',
+          objectFit: 'cover', display: 'block', visibility: 'visible', opacity: '1',
+          zIndex: '0', background: '#000'
+        });
+        if (v.parentElement !== document.getElementById('arContainer')) {
+          try { document.getElementById('arContainer').insertBefore(v, scene); } catch (_) {}
+        }
+      });
+
+      forceTransparentRenderer();
+      return cameraVideos.length;
+    }
+
+    const domObserver = new MutationObserver(() => {
+      if (arRunning || starting) styleMindARCameraVideos();
+    });
+    domObserver.observe(document.body, { childList: true, subtree: true });
+
+    function startCameraStyleWatch() {
+      clearInterval(cameraStyleTimer);
+      cameraStyleTimer = setInterval(styleMindARCameraVideos, 250);
+    }
+
+    function stopCameraStyleWatch() {
+      clearInterval(cameraStyleTimer);
+      cameraStyleTimer = null;
+    }
+
+    /* ============================================================
+       BUILD 200 TARGET ANCHORS
+       ============================================================ */
+    function createVideoPlane() {
+      if (videoPlane) return videoPlane;
+      const plane = document.createElement('a-plane');
+      plane.id = 'dynamicVideoPlane';
+      plane.setAttribute('visible', 'false');
+      plane.setAttribute('position', '0 0 0.01');
+      plane.setAttribute('geometry', 'primitive: plane; width: 1; height: 1.41443');
+      plane.setAttribute('material', 'shader: flat; src: #dynamicPosterVideo; side: double; transparent: true');
+      videoPlane = plane;
+      scene.appendChild(videoPlane);
+      return plane;
+    }
+
+    function buildTargetAnchors() {
+      if (anchorsBuilt) return;
+      createVideoPlane();
+
+      for (const item of manifest) {
+        const anchor = document.createElement('a-entity');
+        anchor.id = `target-${item.targetIndex}`;
+        anchor.dataset.targetIndex = String(item.targetIndex);
+        anchor.setAttribute('mindar-image-target', `targetIndex: ${item.targetIndex}`);
+
+        anchor.addEventListener('targetFound', () => activatePoster(item, anchor));
+        anchor.addEventListener('targetLost', () => deactivatePoster(item, anchor));
+        scene.appendChild(anchor);
+      }
+
+      anchorsBuilt = true;
+    }
+
+    /* ============================================================
+       DYNAMIC VIDEO LOADING
+       ============================================================ */
+    async function loadAndPlayVideo(item) {
+      video.pause();
+      video.loop = item.loop !== false;
+      video.muted = true;
+      video.playsInline = true;
+      video.setAttribute('playsinline', '');
+      video.setAttribute('webkit-playsinline', '');
+
+      const wanted = new URL(item.video, window.location.href).href;
+      if (video.src !== wanted) {
+        video.removeAttribute('src');
+        video.load();
+        video.src = item.video;
+        video.load();
+      }
+
+      if (CONFIG.restartAnimationOnFound) {
+        try { video.currentTime = 0; } catch (_) {}
+      }
+
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+          video.removeEventListener('canplay', onCanPlay);
+          video.removeEventListener('error', onError);
+        };
+        const onCanPlay = async () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          try {
+            await video.play();
+            resolve();
+          } catch (e) {
+            reject(e);
+          }
+        };
+        const onError = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(new Error(`Could not load ${item.video}. Check that this MP4 exists on your host.`));
+        };
+        video.addEventListener('canplay', onCanPlay, { once: true });
+        video.addEventListener('error', onError, { once: true });
+        if (video.readyState >= 3) onCanPlay();
+      });
+    }
+
+    async function activatePoster(item, anchor) {
+      if (!arRunning) return;
+      activeTargetIndex = item.targetIndex;
+      activeAnchor = anchor;
+
+      scanLabel.textContent = `${item.name.toUpperCase()} FOUND · LOADING…`;
+      liveBadge.textContent = `TARGET ${pad3(item.targetIndex + 1)} · ${item.name}`;
+
+      const plane = createVideoPlane();
+      if (plane.parentElement !== anchor) anchor.appendChild(plane);
+
+      const width = item.scale;
+      const height = item.ratio * item.scale;
+      plane.setAttribute('geometry', `primitive: plane; width: ${width}; height: ${height}`);
+      plane.setAttribute('position', `${item.offsetX} ${item.offsetY} 0.01`);
+      plane.setAttribute('rotation', `0 0 ${item.rotation}`);
+      plane.setAttribute('visible', 'false');
+
+      try {
+        await loadAndPlayVideo(item);
+        if (activeTargetIndex !== item.targetIndex) return;
+        plane.setAttribute('visible', 'true');
+        scanLabel.textContent = `${item.name.toUpperCase()} · PLAYING`;
+      } catch (err) {
+        console.error(err);
+        plane.setAttribute('visible', 'false');
+        scanLabel.textContent = `${item.name.toUpperCase()} · VIDEO ERROR`;
+        toast(err.message || String(err));
+      }
+    }
+
+    function deactivatePoster(item, anchor) {
+      if (activeTargetIndex !== item.targetIndex) return;
+
+      if (CONFIG.pauseAnimationOnLost) {
+        try { video.pause(); } catch (_) {}
+      }
+      if (videoPlane) videoPlane.setAttribute('visible', 'false');
+
+      activeTargetIndex = null;
+      activeAnchor = null;
+      scanLabel.textContent = 'POINT CAMERA AT A POSTER';
+      liveBadge.textContent = 'LIVE CAMERA · SCANNING';
+    }
+
+    /* ============================================================
+       IPHONE VIDEO UNLOCK
+       ============================================================ */
+    async function unlockVideoForIOS() {
+      try {
+        video.muted = true;
+        video.playsInline = true;
+        // Safari user-gesture unlock. No real source is loaded yet; failures are harmless.
+        const p = video.play();
+        if (p) await p;
+        video.pause();
+      } catch (_) {}
+    }
+
+    /* ============================================================
+       START / STOP AR
+       ============================================================ */
+    async function startAR() {
+      if (starting || arRunning) return;
+      starting = true;
+      startBtn.disabled = true;
+      startBtn.textContent = 'STARTING…';
+
+      try {
+        if (!window.isSecureContext) throw new Error('Camera access requires HTTPS. Open the published https:// URL directly in Safari/Chrome.');
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Camera API is unavailable in this browser.');
+
+        await unlockVideoForIOS();
+        await waitForScene();
+        forceTransparentRenderer();
+
+        const targetInfo = await checkTargetFile();
+        if (!manifest.length) await loadManifest();
+        buildTargetAnchors();
+
+        setStatus(
+          `READY TO START\nTargets: ${manifest.length}\nManifest: loaded\n${targetInfo.length ? `targets.mind: ${targetInfo.length.toLocaleString()} bytes` : 'targets.mind: reachable'}\nStarting camera…`,
+          'good'
+        );
+
+        const arSystem = scene.systems['mindar-image-system'];
+        if (!arSystem || typeof arSystem.start !== 'function') throw new Error('MindAR image system is not available. Reload the page and check internet access.');
+
+        startCameraStyleWatch();
+        await arSystem.start();
+
+        arRunning = true;
+        styleMindARCameraVideos();
+        startScreen.style.display = 'none';
+        scanUI.style.display = 'block';
+        topBar.style.display = 'flex';
+        scanLabel.textContent = 'POINT CAMERA AT A POSTER';
+        liveBadge.textContent = 'LIVE CAMERA · SCANNING';
+      } catch (err) {
+        console.error('AR START ERROR', err);
+        const msg = err && err.message ? err.message : String(err);
+        setStatus(msg, 'bad');
+        toast(msg);
+        startBtn.disabled = false;
+        startBtn.textContent = 'TRY AGAIN';
+        stopCameraStyleWatch();
+      } finally {
+        starting = false;
+      }
+    }
+
+    async function stopAR() {
+      try {
+        const arSystem = scene.systems['mindar-image-system'];
+        if (arSystem && typeof arSystem.stop === 'function') arSystem.stop();
+      } catch (_) {}
+
+      try {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      } catch (_) {}
+
+      if (videoPlane) videoPlane.setAttribute('visible', 'false');
+      activeTargetIndex = null;
+      activeAnchor = null;
+      arRunning = false;
+      stopCameraStyleWatch();
+
+      scanUI.style.display = 'none';
+      topBar.style.display = 'none';
+      startScreen.style.display = 'flex';
+      startBtn.disabled = false;
+      startBtn.textContent = 'START AR';
+      setStatus(`AR stopped.\n${manifest.length} poster definitions ready.`, 'good');
+    }
+
+    startBtn.addEventListener('click', startAR);
+    stopBtn.addEventListener('click', stopAR);
+
+    // If Safari still blocks playback, a tap anywhere in the AR view retries the active video.
+    document.addEventListener('click', async (event) => {
+      if (!arRunning || event.target === stopBtn || activeTargetIndex === null || !video.paused) return;
+      try { await video.play(); } catch (_) {}
+    });
+
+    /* ============================================================
+       INITIAL PREFLIGHT
+       ============================================================ */
+    async function init() {
+      try {
+        const [, manifestInfo, targetInfo] = await Promise.all([
+          waitForScene(),
+          loadManifest(),
+          checkTargetFile()
+        ]);
+
+        buildTargetAnchors();
+        forceTransparentRenderer();
+        startBtn.disabled = false;
+        startBtn.textContent = 'START AR';
+        setStatus(
+          `READY\nPoster definitions: ${manifestInfo.count}\nManifest: ${manifestInfo.source}\n${targetInfo.length ? `targets.mind: ${targetInfo.length.toLocaleString()} bytes` : 'targets.mind: reachable'}\nOnly the detected poster's MP4 will load.`,
+          'good'
+        );
+      } catch (err) {
+        const msg = err && err.message ? err.message : String(err);
+        console.error(err);
+        setStatus(msg, 'bad');
+        // Keep button enabled so user can retry after redeploying files.
+        startBtn.disabled = false;
+        startBtn.textContent = 'START AR';
+      }
+    }
+
+    scene.addEventListener('renderstart', forceTransparentRenderer);
+    window.addEventListener('resize', () => setTimeout(styleMindARCameraVideos, 50));
+    window.addEventListener('orientationchange', () => setTimeout(styleMindARCameraVideos, 150));
+    init();
+  })();
+  </script>
+</body>
+</html>
