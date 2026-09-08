@@ -10,21 +10,21 @@
     "targetIndex": 1,
     "name": "Poster 002",
     "video": "videos/poster-002.mp4",
-    "width": 1080,
-    "height": 1350
+    "width": 596,
+    "height": 843
   },
   {
     "targetIndex": 2,
     "name": "Poster 003",
     "video": "videos/poster-003.mp4",
-    "width": 1920,
-    "height": 1080
+    "width": 596,
+    "height": 843
   },
   {
     "targetIndex": 3,
     "name": "Poster 004",
     "video": "videos/poster-004.mp4",
     "width": 1080,
-    "height": 1350
+    "height": 1080
   }
 ]
