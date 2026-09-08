@@ -34,8 +34,8 @@
     }
 
     /* MindAR injects the live camera video dynamically. */
-    #arContainer video:not(#dynamicPosterVideo),
-    body > video:not(#dynamicPosterVideo) {
+    #arContainer video:not(#dynamicPosterVideo):not(#cameraPreview),
+    body > video:not(#dynamicPosterVideo):not(#cameraPreview) {
       position: fixed !important;
       inset: 0 !important;
       width: 100% !important;
@@ -51,10 +51,39 @@
     /* When AR is paused from the UI, hide the camera visually.
        We pause MindAR instead of destroying it, so Safari can resume
        without requiring a full page refresh. */
-    body.ar-paused #arContainer video:not(#dynamicPosterVideo),
-    body.ar-paused > video:not(#dynamicPosterVideo) {
+    body.ar-paused #arContainer video:not(#dynamicPosterVideo):not(#cameraPreview),
+    body.ar-paused > video:not(#dynamicPosterVideo):not(#cameraPreview) {
       visibility: hidden !important;
       opacity: 0 !important;
+    }
+
+    /* Stable, pre-existing iOS Safari camera preview.
+       MindAR still owns the camera stream for tracking; this element simply
+       displays the SAME MediaStream without requesting a second camera. */
+    #cameraPreview {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      visibility: hidden;
+      opacity: 0;
+      z-index: 0;
+      background: #000;
+      pointer-events: none;
+      transform: translateZ(0);
+      -webkit-transform: translateZ(0);
+    }
+
+    body.ar-live #cameraPreview {
+      visibility: visible;
+      opacity: 1;
+    }
+
+    body.ar-paused #cameraPreview {
+      visibility: hidden;
+      opacity: 0;
     }
 
     #arScene {
@@ -249,6 +278,15 @@
 
 <body>
   <div id="arContainer">
+    <video
+      id="cameraPreview"
+      autoplay
+      muted
+      playsinline
+      webkit-playsinline
+      aria-hidden="true"
+    ></video>
+
     <a-scene
       id="arScene"
       mindar-image="imageTargetSrc: ./targets.mind; autoStart: false; maxTrack: 1; uiLoading: no; uiScanning: no; uiError: no; filterMinCF: 0.001; filterBeta: 0.01; warmupTolerance: 5; missTolerance: 5;"
@@ -334,6 +372,7 @@
     const statusBox = document.getElementById('statusBox');
     const errorToast = document.getElementById('errorToast');
     const video = document.getElementById('dynamicPosterVideo');
+    const cameraPreview = document.getElementById('cameraPreview');
 
     let manifest = [];
     let anchorsBuilt = false;
@@ -455,89 +494,191 @@
     }
 
     function getMindARCameraVideos() {
-      return [...document.querySelectorAll('video')].filter(v => v !== video && v.srcObject);
-    }
-
-    function styleMindARCameraVideos() {
-      const cameraVideos = getMindARCameraVideos();
-
-      cameraVideos.forEach(v => {
-        // IMPORTANT FOR IOS SAFARI:
-        // Do NOT re-parent a live MediaStream <video>. Moving it in the DOM
-        // can suspend playback until Safari wakes/recomposites the page.
-        v.muted = true;
-        v.defaultMuted = true;
-        v.playsInline = true;
-        v.autoplay = true;
-        v.setAttribute('muted', '');
-        v.setAttribute('playsinline', '');
-        v.setAttribute('webkit-playsinline', '');
-        Object.assign(v.style, {
-          position: 'fixed', inset: '0', width: '100%', height: '100%',
-          objectFit: 'cover', display: 'block', visibility: sessionPaused ? 'hidden' : 'visible',
-          opacity: sessionPaused ? '0' : '1', zIndex: '0', background: '#000'
-        });
-      });
-
-      forceTransparentRenderer();
-      return cameraVideos.length;
+      return [...document.querySelectorAll('video')].filter(v =>
+        v !== video &&
+        v !== cameraPreview &&
+        v.srcObject instanceof MediaStream
+      );
     }
 
     function delay(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    async function waitForLiveCamera(timeoutMs = 6500) {
+    function prepareVideoElementForIOS(v) {
+      if (!v) return;
+      v.muted = true;
+      v.defaultMuted = true;
+      v.autoplay = true;
+      v.playsInline = true;
+      v.setAttribute('muted', '');
+      v.setAttribute('autoplay', '');
+      v.setAttribute('playsinline', '');
+      v.setAttribute('webkit-playsinline', '');
+      try { v.disablePictureInPicture = true; } catch (_) {}
+    }
+
+    async function bindCameraPreview(cam) {
+      if (!cam || !(cam.srcObject instanceof MediaStream)) return false;
+
+      prepareVideoElementForIOS(cam);
+      prepareVideoElementForIOS(cameraPreview);
+
+      if (cameraPreview.srcObject !== cam.srcObject) {
+        cameraPreview.srcObject = cam.srcObject;
+      }
+
+      try {
+        const p = cameraPreview.play();
+        if (p) await p;
+      } catch (err) {
+        console.warn('Camera preview play warning:', err);
+      }
+
+      return true;
+    }
+
+    function styleMindARCameraVideos() {
+      const cameraVideos = getMindARCameraVideos();
+
+      cameraVideos.forEach(v => {
+        prepareVideoElementForIOS(v);
+
+        // Keep MindAR's own camera video alive for tracking, but don't depend
+        // on its dynamically-inserted element for what the user sees.
+        Object.assign(v.style, {
+          position: 'fixed',
+          inset: '0',
+          width: '100%',
+          height: '100%',
+          objectFit: 'cover',
+          display: 'block',
+          visibility: 'visible',
+          opacity: '0.001',
+          zIndex: '-1',
+          pointerEvents: 'none',
+          background: '#000'
+        });
+
+        bindCameraPreview(v).catch(() => {});
+      });
+
+      forceTransparentRenderer();
+      return cameraVideos.length;
+    }
+
+    async function waitForActualVideoFrame(videoEl, timeoutMs = 1800) {
+      if (!videoEl) throw new Error('Camera preview element is missing.');
+
+      // requestVideoFrameCallback is the most reliable signal that Safari
+      // has actually produced a visible video frame.
+      if (typeof videoEl.requestVideoFrameCallback === 'function') {
+        return await new Promise((resolve, reject) => {
+          let done = false;
+          const timer = setTimeout(() => {
+            if (done) return;
+            done = true;
+            reject(new Error('Camera stream exists, but Safari has not produced a live frame yet.'));
+          }, timeoutMs);
+
+          videoEl.requestVideoFrameCallback(() => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve(true);
+          });
+        });
+      }
+
+      const started = performance.now();
+      let lastTime = videoEl.currentTime || 0;
+
+      while (performance.now() - started < timeoutMs) {
+        await delay(120);
+        const nowTime = videoEl.currentTime || 0;
+        if (
+          videoEl.readyState >= 2 &&
+          videoEl.videoWidth > 0 &&
+          videoEl.videoHeight > 0 &&
+          !videoEl.paused &&
+          nowTime > lastTime + 0.01
+        ) return true;
+        lastTime = nowTime;
+      }
+
+      throw new Error('Camera stream exists, but no advancing video frames were detected.');
+    }
+
+    async function rebindCameraPreview(stream) {
+      if (!(stream instanceof MediaStream)) return;
+      try { cameraPreview.pause(); } catch (_) {}
+      cameraPreview.srcObject = null;
+      await delay(60);
+      prepareVideoElementForIOS(cameraPreview);
+      cameraPreview.srcObject = stream;
+      try {
+        const p = cameraPreview.play();
+        if (p) await p;
+      } catch (_) {}
+    }
+
+    async function waitForLiveCamera(timeoutMs = 7000) {
       const started = performance.now();
       let lastPlayError = null;
 
       while (performance.now() - started < timeoutMs) {
-        styleMindARCameraVideos();
         const cameraVideos = getMindARCameraVideos();
 
         for (const cam of cameraVideos) {
           try {
-            cam.muted = true;
-            cam.playsInline = true;
-            cam.autoplay = true;
-            cam.setAttribute('playsinline', '');
-            cam.setAttribute('webkit-playsinline', '');
+            prepareVideoElementForIOS(cam);
             if (cam.paused) {
-              const playPromise = cam.play();
-              if (playPromise) await playPromise;
+              const p = cam.play();
+              if (p) await p;
+            }
+            await bindCameraPreview(cam);
+
+            if (
+              cameraPreview.readyState >= 2 &&
+              cameraPreview.videoWidth > 0 &&
+              cameraPreview.videoHeight > 0 &&
+              !cameraPreview.paused
+            ) {
+              try {
+                await waitForActualVideoFrame(cameraPreview, 900);
+                document.body.classList.add('ar-live');
+                return cameraPreview;
+              } catch (_) {
+                // The stream exists but the preview is frozen. Rebind the SAME
+                // stream; this does not call getUserMedia a second time.
+                await rebindCameraPreview(cam.srcObject);
+                try {
+                  await waitForActualVideoFrame(cameraPreview, 900);
+                  document.body.classList.add('ar-live');
+                  return cameraPreview;
+                } catch (_) {}
+              }
             }
           } catch (err) {
             lastPlayError = err;
           }
-
-          if (
-            cam.readyState >= 2 &&
-            cam.videoWidth > 0 &&
-            cam.videoHeight > 0 &&
-            !cam.paused
-          ) {
-            styleMindARCameraVideos();
-            return cam;
-          }
         }
 
-        await delay(120);
+        await delay(100);
       }
 
-      const extra = lastPlayError && lastPlayError.message ? ` Last camera play error: ${lastPlayError.message}` : '';
-      throw new Error(`Camera stream started but Safari did not begin displaying live frames.${extra}`);
+      const extra = lastPlayError && lastPlayError.message ? ` Last camera error: ${lastPlayError.message}` : '';
+      throw new Error(`Camera permission was granted, but Safari did not produce live camera frames.${extra}`);
     }
 
     async function kickCameraOnce(arSystem) {
-      // iOS Safari occasionally creates the stream but leaves the camera video
-      // suspended. MindAR's documented pause/unpause lifecycle gives us a clean
-      // way to restart that feed without destroying the whole AR session.
       try {
         if (arSystem && typeof arSystem.pause === 'function' && typeof arSystem.unpause === 'function') {
           arSystem.pause();
-          await delay(180);
+          await delay(120);
           arSystem.unpause();
-          await delay(180);
+          await delay(160);
+          styleMindARCameraVideos();
         }
       } catch (err) {
         console.warn('Camera kick warning:', err);
@@ -546,11 +687,11 @@
 
     async function ensureCameraIsLive(arSystem) {
       try {
-        return await waitForLiveCamera(3500);
+        return await waitForLiveCamera(3600);
       } catch (firstError) {
-        console.warn('Initial camera wake failed; retrying through MindAR pause/unpause.', firstError);
+        console.warn('Initial camera wake failed; retrying without requesting a second stream.', firstError);
         await kickCameraOnce(arSystem);
-        return await waitForLiveCamera(5000);
+        return await waitForLiveCamera(5200);
       }
     }
 
@@ -563,14 +704,15 @@
       clearInterval(cameraStyleTimer);
       cameraStyleTimer = setInterval(() => {
         styleMindARCameraVideos();
-        if (arRunning) {
+        if (arRunning && document.visibilityState === 'visible') {
           getMindARCameraVideos().forEach(cam => {
-            if (cam.paused && document.visibilityState === 'visible') {
-              cam.play().catch(() => {});
-            }
+            if (cam.paused) cam.play().catch(() => {});
           });
+          if (cameraPreview.paused && cameraPreview.srcObject) {
+            cameraPreview.play().catch(() => {});
+          }
         }
-      }, 250);
+      }, 300);
     }
 
     function stopCameraStyleWatch() {
@@ -818,80 +960,48 @@
     }
 
     /* ============================================================
-       IPHONE VIDEO UNLOCK
+       START / STOP AR — IOS USER-GESTURE SAFE
        ============================================================ */
-    async function unlockVideoForIOS() {
-      try {
-        video.muted = true;
-        video.playsInline = true;
-        // Safari user-gesture unlock. No real source is loaded yet; failures are harmless.
-        const p = video.play();
-        if (p) await p;
-        video.pause();
-      } catch (_) {}
+
+    function failStart(err) {
+      console.error('AR START / RESUME ERROR', err);
+      const msg = err && err.message ? err.message : String(err);
+      setStatus(msg, 'bad');
+      toast(msg);
+      startBtn.disabled = false;
+      startBtn.textContent = sessionInitialized ? 'RESUME AR' : 'TRY AGAIN';
+      starting = false;
+
+      if (sessionInitialized && arSystemRef && typeof arSystemRef.pause === 'function') {
+        try { arSystemRef.pause(); } catch (_) {}
+        sessionPaused = true;
+        document.body.classList.remove('ar-live');
+        document.body.classList.add('ar-paused');
+      }
     }
 
-    /* ============================================================
-       START / STOP AR
-       ============================================================ */
-    async function startAR() {
-      if (starting || arRunning) return;
-      starting = true;
-      startBtn.disabled = true;
-      startBtn.textContent = sessionInitialized ? 'RESUMING…' : 'STARTING…';
-      document.body.classList.remove('ar-paused');
-
+    async function finishStartAR(arSystem, lifecyclePromise, isResume) {
       try {
-        if (!window.isSecureContext) throw new Error('Camera access requires HTTPS. Open the published https:// URL directly in Safari/Chrome.');
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Camera API is unavailable in this browser.');
-
-        await unlockVideoForIOS();
-        await waitForScene();
-        forceTransparentRenderer();
-
-        const targetInfo = await checkTargetFile();
-        if (!manifest.length) await loadManifest();
-        buildTargetAnchors();
-
-        const arSystem = scene.systems['mindar-image-system'];
-        if (!arSystem) throw new Error('MindAR image system is not available. Reload the page and check internet access.');
-        arSystemRef = arSystem;
-
-        startCameraStyleWatch();
-
-        if (!sessionInitialized) {
-          setStatus(
-            `STARTING CAMERA
-Targets: ${manifest.length}
-${targetInfo.length ? `targets.mind: ${targetInfo.length.toLocaleString()} bytes` : 'targets.mind: reachable'}
-Waiting for live camera frames…`,
-            'good'
-          );
-
-          if (typeof arSystem.start !== 'function') throw new Error('MindAR start() is unavailable.');
-          await arSystem.start();
-          sessionInitialized = true;
-          sessionPaused = false;
-        } else {
-          setStatus(`RESUMING AR
-${manifest.length} poster definitions ready.
-Restarting live camera…`, 'good');
-
-          // Use MindAR's supported pause/unpause lifecycle instead of stop/start.
-          // Full stop() tears down internal camera/tracker state and is less reliable
-          // when starting again on iOS Safari.
-          if (typeof arSystem.unpause !== 'function') throw new Error('MindAR unpause() is unavailable.');
-          arSystem.unpause();
-          sessionPaused = false;
+        // IMPORTANT: arSystem.start()/unpause() was already invoked synchronously
+        // by the button tap before this async continuation begins.
+        if (lifecyclePromise && typeof lifecyclePromise.then === 'function') {
+          await lifecyclePromise;
         }
 
-        // Do not hide the start screen until Safari is REALLY producing camera frames.
-        // This directly fixes the "camera only starts after screen off/on" behavior.
+        if (!isResume) {
+          sessionInitialized = true;
+        }
+        sessionPaused = false;
+
+        startCameraStyleWatch();
+        styleMindARCameraVideos();
+
         const cam = await ensureCameraIsLive(arSystem);
 
         arRunning = true;
         sessionPaused = false;
         document.body.classList.remove('ar-paused');
+        document.body.classList.add('ar-live');
         styleMindARCameraVideos();
 
         startScreen.style.display = 'none';
@@ -900,8 +1010,6 @@ Restarting live camera…`, 'good');
         scanLabel.textContent = 'POINT CAMERA AT A POSTER';
         liveBadge.textContent = `LIVE CAMERA · ${cam.videoWidth}×${cam.videoHeight}`;
 
-        // If a target was already in view when unpausing and MindAR does not emit
-        // a fresh targetFound event, re-activate the last known target ourselves.
         if (lastSeenTarget && activeTargetIndex === null) {
           setTimeout(() => {
             if (arRunning && lastSeenTarget && activeTargetIndex === null) {
@@ -909,23 +1017,65 @@ Restarting live camera…`, 'good');
             }
           }, 250);
         }
-      } catch (err) {
-        console.error('AR START / RESUME ERROR', err);
-        const msg = err && err.message ? err.message : String(err);
-        setStatus(msg, 'bad');
-        toast(msg);
-        startBtn.disabled = false;
-        startBtn.textContent = sessionInitialized ? 'RESUME AR' : 'TRY AGAIN';
 
-        // If initial start succeeded internally but camera display failed,
-        // leave the initialized session paused so the next tap can unpause it.
-        if (sessionInitialized && arSystemRef && typeof arSystemRef.pause === 'function') {
-          try { arSystemRef.pause(); } catch (_) {}
-          sessionPaused = true;
-          document.body.classList.add('ar-paused');
-        }
-      } finally {
         starting = false;
+      } catch (err) {
+        failStart(err);
+      }
+    }
+
+    // Deliberately NOT async. On iPhone Safari the MindAR start/unpause call
+    // is made directly inside the user's tap event, before any await/fetch/play
+    // can consume the browser's transient user activation.
+    function startAR() {
+      if (starting || arRunning) return;
+
+      starting = true;
+      startBtn.disabled = true;
+      startBtn.textContent = sessionInitialized ? 'RESUMING…' : 'STARTING…';
+      document.body.classList.remove('ar-paused');
+      document.body.classList.remove('ar-live');
+
+      try {
+        if (!window.isSecureContext) {
+          throw new Error('Camera access requires HTTPS. Open the published https:// URL directly in Safari.');
+        }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('Camera API is unavailable in this browser.');
+        }
+
+        const arSystem = arSystemRef || scene.systems['mindar-image-system'];
+        if (!arSystem) {
+          throw new Error('MindAR is still loading. Wait until the status says READY, then tap START AR again.');
+        }
+        arSystemRef = arSystem;
+
+        let lifecyclePromise = null;
+        const isResume = sessionInitialized;
+
+        if (!sessionInitialized) {
+          setStatus(`STARTING CAMERA
+Poster definitions: ${manifest.length}
+Requesting the rear camera directly from this tap…`, 'good');
+          if (typeof arSystem.start !== 'function') throw new Error('MindAR start() is unavailable.');
+
+          // CRITICAL: invoke immediately in the click handler.
+          lifecyclePromise = arSystem.start();
+        } else {
+          setStatus(`RESUMING CAMERA
+${manifest.length} poster definitions ready.`, 'good');
+          if (typeof arSystem.unpause !== 'function') throw new Error('MindAR unpause() is unavailable.');
+
+          // CRITICAL: resume immediately in the click handler too.
+          arSystem.unpause();
+          lifecyclePromise = Promise.resolve();
+        }
+
+        // Continue asynchronously only AFTER camera lifecycle has been invoked.
+        finishStartAR(arSystem, lifecyclePromise, isResume);
+
+      } catch (err) {
+        failStart(err);
       }
     }
 
@@ -943,12 +1093,14 @@ Restarting live camera…`, 'good');
       }
 
       try { video.pause(); } catch (_) {}
+      try { cameraPreview.pause(); } catch (_) {}
 
       destroyActiveVideoPlane();
       activeTargetIndex = null;
       activeAnchor = null;
       arRunning = false;
       sessionPaused = true;
+      document.body.classList.remove('ar-live');
       document.body.classList.add('ar-paused');
       stopCameraStyleWatch();
 
@@ -983,7 +1135,9 @@ Tap START AR to resume without refreshing.`, 'good');
         try {
           document.body.classList.remove('ar-paused');
           if (arSystemRef && typeof arSystemRef.unpause === 'function') arSystemRef.unpause();
-          await ensureCameraIsLive(arSystemRef);
+          const cam = await ensureCameraIsLive(arSystemRef);
+          document.body.classList.add('ar-live');
+          liveBadge.textContent = `LIVE CAMERA · ${cam.videoWidth}×${cam.videoHeight}`;
           styleMindARCameraVideos();
         } catch (err) {
           console.warn('Visibility camera recovery warning:', err);
@@ -1013,7 +1167,8 @@ Tap START AR to resume without refreshing.`, 'good');
         startBtn.disabled = false;
         startBtn.textContent = 'START AR';
         setStatus(
-          `READY\nPoster definitions: ${manifestInfo.count}\nManifest: ${manifestInfo.source}\n${targetInfo.length ? `targets.mind: ${targetInfo.length.toLocaleString()} bytes` : 'targets.mind: reachable'}\nOnly the detected poster's MP4 will load.`,
+          `READY\nPoster definitions: ${manifestInfo.count}\nManifest: ${manifestInfo.source}\n${targetInfo.length ? `targets.mind: ${targetInfo.length.toLocaleString()} bytes` : 'targets.mind: reachable'}\nOnly the detected poster's MP4 will load.
+Camera startup: iOS-safe direct-tap mode.`,
           'good'
         );
       } catch (err) {
